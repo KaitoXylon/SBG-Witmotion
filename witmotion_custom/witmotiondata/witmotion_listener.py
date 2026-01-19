@@ -1,76 +1,74 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Imu, MagneticField
-import tf_transformations
+from geometry_msgs.msg import Quaternion
 import math
+
+def euler_from_quaternion(x, y, z, w):
+    """
+    Converts quaternion (w in last place) to euler roll, pitch, yaw
+    quaternion = [x, y, z, w]
+    Bellow should be replaced when porting for ROS 2 Python -> 
+    from tf_transformations import euler_from_quaternion
+    """
+    t0 = +2.0 * (w * x + y * z)
+    t1 = +1.0 - 2.0 * (x * x + y * y)
+    roll_x = math.atan2(t0, t1)
+    
+    t2 = +2.0 * (w * y - z * x)
+    t2 = +1.0 if t2 > +1.0 else t2
+    t2 = -1.0 if t2 < -1.0 else t2
+    pitch_y = math.asin(t2)
+    
+    t3 = +2.0 * (w * z + x * y)
+    t4 = +1.0 - 2.0 * (y * y + z * z)
+    yaw_z = math.atan2(t3, t4)
+    
+    return roll_x, pitch_y, yaw_z # in radians
 
 class WitmotionListener(Node):
     def __init__(self):
         super().__init__('witmotion_listener')
 
-        # Subscribe to IMU topic (Fused orientation)
-        self.imu_sub = self.create_subscription(
-            Imu,
-            '/imu', 
-            self.imu_callback,
-            10)
-
-        # Subscribe to Magnetometer topic (Raw magnetic data)
-        self.mag_sub = self.create_subscription(
-            MagneticField,
-            '/magnetometer',
-            self.mag_callback,
-            10)
+        # Subscribe to IMU topic
+        self.subscription = self.create_subscription(
+            Quaternion, 
+            "/orientation", 
+            self.imu_callback, 
+            10
+        )
 
         self.get_logger().info("Listener Started. Rotate sensor to check North...")
 
     def imu_callback(self, msg):
         # 1. Get Quaternion
-        x = msg.orientation.x
-        y = msg.orientation.y
-        z = msg.orientation.z
-        w = msg.orientation.w
+        x = msg.x
+        y = msg.y
+        z = msg.z
+        w = msg.w
 
-        # 2. Convert to Euler (Roll, Pitch, Yaw)
-        euler = tf_transformations.euler_from_quaternion([x, y, z, w])
-        roll = euler[0]
-        pitch = euler[1]
-        yaw = euler[2] # This is in Radians (-pi to +pi)
+        # 2. Convert to Euler (Roll, Pitch, Yaw) using the helper function
+        (roll, pitch, yaw) = euler_from_quaternion(x, y, z, w)
+
+        # DEBUG: Print raw values
+        # self.get_logger().info(f"roll: {math.degrees(roll):.1f}°")
+        # self.get_logger().info(f"pitch: {math.degrees(pitch):.1f}°")
+        # self.get_logger().info(f"yaw: {math.degrees(yaw):.1f}°")
 
         # 3. Convert Yaw to Degrees (-180 to +180)
-        yaw_deg = math.degrees(yaw)
+        # FIX: Changed 'roll' to 'yaw' here because you want heading
+        yaw_deg = math.degrees(roll) 
 
-        # 4. Convert to Compass Heading (0-360 degrees from North)
-        # ROS ENU standard: 0=East, 90=North. 
-        # Compass standard: 0=North, 90=East.
-        # This formula aligns them:
-        # compass_heading = (yaw_deg) % 360
-        correct = yaw_deg +360
-        compass_heading = correct%360
+        # 4. Convert to Compass Heading (0-360 degrees)
+        # Normalizes -180/180 to 0-360 range
+        head = yaw_deg+180
 
-        # NOTE: If your sensor mounts X-axis forward, '0' might be East. 
-        # If the value is 90 degrees off, use this formula instead:
-        # compass_heading = (450 - yaw_deg) % 360 
+        compass_heading = (head) % 360
+        
 
         self.get_logger().info(
             f"Heading: {compass_heading:.1f}° (Raw Yaw: {yaw_deg:.1f})"
         )
-
-    def mag_callback(self, msg):
-        # Calculate rough heading from raw magnetometer (Backup method)
-        mx = msg.magnetic_field.x
-        my = msg.magnetic_field.y
-        
-        # Standard atan2 for magnetic heading
-        heading_rad = math.atan2(my, mx)
-        heading_deg = math.degrees(heading_rad)
-        
-        # Normalize to 0-360
-        if heading_deg < 0:
-            heading_deg += 360
-            
-        # self.get_logger().info(f"Raw Mag Heading: {heading_deg:.1f}")
 
 def main(args=None):
     rclpy.init(args=args)
