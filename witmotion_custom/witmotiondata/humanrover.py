@@ -1,123 +1,56 @@
 import rclpy
 from rclpy.node import Node
 from sbg_driver.msg import SbgGpsPos
-from geometry_msgs.msg import Quaternion , Vector3
+from geometry_msgs.msg import Quaternion, Vector3
 import tf_transformations
 import math
-
-
 
 class Human(Node):
     def __init__(self):
         super().__init__('human')
 
-        self.sbg_sub = self.create_subscription(SbgGpsPos,"sbg/gps_pos", self.sgg_callback,10)
-        self.wit_sub = self.create_subscription(Quaternion, "/orientation", self.wit_callback,10)
+        self.sbg_sub = self.create_subscription(SbgGpsPos, "sbg/gps_pos", self.sgg_callback, 10)
+        self.wit_sub = self.create_subscription(Quaternion, "/orientation", self.wit_callback, 10)
+        self.cmd_sub = self.create_subscription(Vector3, "/user_command", self.cmd_callback, 10)
 
         self.get_logger().info("Listening started, human rover is ready")
 
-        self.cmd_sub = self.create_subscription(Vector3, "/user_command", self.cmd_callback, 10)
-
-
-        self.ref_lat = None
-        self.ref_lon = None
-        self.has_ref = False
-
-        self.target_distance = 0.0
-        self.target_heading = 90.0
-        self.has_new_command = True
-
+        # State variables
+        self.target_lat = 0.0
+        self.target_lon = 0.0
+        self.target_heading = 0.0
+        self.has_new_command = False
+        
+        # New variable to share distance between callbacks
+        self.distance_left = None 
 
     def cmd_callback(self, msg):
-        # When user sends input, this function runs automatically
-        self.target_lat= msg.x
+        self.target_lat = msg.x
         self.target_lon = msg.y
         self.has_new_command = True
-        
+        self.distance_left = None # Reset distance on new command
         self.get_logger().info(f"NEW GOAL -> Lat: {self.target_lat}, Lon: {self.target_lon}")
 
-    def sgg_callback(self,msg):
+    def sgg_callback(self, msg):
         if not self.has_new_command:
             return
 
         curr_lat = msg.latitude
         curr_lon = msg.longitude
 
-        # 1. Calculate Distance TO THE TARGET (not from start)
-        distance_left = self.heversine(curr_lat, curr_lon, self.target_lat, self.target_lon)
+        # 1. Calculate Distance and store it in self variable
+        self.distance_left = self.heversine(curr_lat, curr_lon, self.target_lat, self.target_lon)
         
-        # 2. Calculate Direction TO THE TARGET
-        # We save this to 'self.target_heading' so the compass callback can use it
+        # 2. Calculate Direction
         self.target_heading = self.calculate_bearing(curr_lat, curr_lon, self.target_lat, self.target_lon)
-        self.get_logger().info("target heading {target_heading:.2f}")
 
-        # 3. Print status
-        if distance_left > 2.0:
-             # Added throttle so it doesn't spam your terminal
-             self.get_logger().info(f"Go {distance_left:.2f} m more (Heading needed: {self.target_heading:.0f}°)", throttle_duration_sec=1.0)
-        else:
-             self.get_logger().info("Goal reached gimme the real rover")
+        # 3. Check for arrival (Priority over printing distance)
+        if self.distance_left <= 2.0:
+             self.get_logger().info("☑️☑️☑️☑️☑️☑️ Goal reached! Gimme the real rover")
+             self.has_new_command = False # Stop processing until new command
 
-
-
-    def calculate_bearing(self, lat1, lon1, lat2, lon2):
-        # Convert to radians
-        phi1 = math.radians(lat1)
-        phi2 = math.radians(lat2)
-        delta_l = math.radians(lon2 - lon1)
-
-        # Formula to find angle
-        y = math.sin(delta_l) * math.cos(phi2)
-        x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(delta_l)
-        
-        theta = math.atan2(y, x)
-        bearing = math.degrees(theta)
-        
-        # Normalize to 0-360
-        return (bearing + 360) % 360
-
-
-    def heversine(self, lat1 ,lon1, lat2, lon2):
-
-        R = 6371000.0
-
-        phi1 = math.radians(lat1)
-        phi2 = math.radians(lat2)
-        delta_p = math.radians(lat2-lat1)
-        delta_l = math.radians(lon2-lon1)
-
-
-        a = math.sin(delta_p / 2.0)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_l/2.0)**2
-
-        c = 2* math.atan2(math.sqrt(a), math.sqrt(1-a))
-
-        return R *c
-    
-    def euler_from_quaternion(self, x, y, z, w):
-        """
-        Converts quaternion (w in last place) to euler roll, pitch, yaw
-        quaternion = [x, y, z, w]
-        Bellow should be replaced when porting for ROS 2 Python -> 
-        from tf_transformations import euler_from_quaternion
-        """
-        t0 = +2.0 * (w * x + y * z)
-        t1 = +1.0 - 2.0 * (x * x + y * y)
-        roll_x = math.atan2(t0, t1)
-        
-        t2 = +2.0 * (w * y - z * x)
-        t2 = +1.0 if t2 > +1.0 else t2
-        t2 = -1.0 if t2 < -1.0 else t2
-        pitch_y = math.asin(t2)
-        
-        t3 = +2.0 * (w * z + x * y)
-        t4 = +1.0 - 2.0 * (y * y + z * z)
-        yaw_z = math.atan2(t3, t4)
-        
-        return roll_x, pitch_y, yaw_z # in radians
-    
-    
-    def wit_callback(self,msg):
-        if not self.has_new_command:
+    def wit_callback(self, msg):
+        if not self.has_new_command or self.distance_left is None:
             return
         
         x = msg.x
@@ -125,45 +58,59 @@ class Human(Node):
         z = msg.z
         w = msg.w
 
-        (roll, pitch, yaw) = self.euler_from_quaternion(x,y,z,w)
-
+        (roll, pitch, yaw) = tf_transformations.euler_from_quaternion([x, y, z, w])
         yaw_deg = math.degrees(roll)
 
-        head = yaw_deg+180
-        h = head %360
-        self.get_logger().info(f"Current Heading: {h:.1f}°, Target: {self.target_heading:.1f}°")
+        # Calculate turn needed
+        turn = self.shortest(self.target_heading, yaw_deg)
+
+        # --- LOGIC CHANGED HERE ---
         
-
-        turn = self.shortest(self.target_heading , h)
-
-        if abs(turn) < 5.0: # Increased tolerance to 5 deg for human use
-            self.get_logger().info("✅ ALIGNED! Walk Forward." )
+        # Increased tolerance slightly to 8 degrees to make it easier to trigger the distance message
+        if abs(turn) < 8.0: 
+            # ONLY show distance when aligned
+            self.get_logger().info(f"✅ ALIGNED! Walk Forward. | Distance: {self.distance_left:.2f}m", throttle_duration_sec=1.0)
                 
         elif turn > 0:
-            # FIX 4: Removed self.turn_left() (doesn't exist)
-            # FIX 5: Changed 'turn_needed' to 'turn'
-            self.get_logger().info(f"🔄 TURN RIGHT by {turn:.0f}°")
+            self.get_logger().info(f"🔄 TURN RIGHT by {turn:.0f}°", throttle_duration_sec=1.0)
                 
         else: 
-            # FIX 6: Changed 'turn_needed' to 'turn'
-            self.get_logger().info(f"🔄 TURN LEFT by {abs(turn):.0f}°")
+            self.get_logger().info(f"🔄 TURN LEFT by {abs(turn):.0f}°", throttle_duration_sec=1.0)
 
-    def shortest(self , target_heading , yaw_deg):
+    def calculate_bearing(self, lat1, lon1, lat2, lon2):
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        delta_l = math.radians(lon2 - lon1)
+
+        y = math.sin(delta_l) * math.cos(phi2)
+        x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(delta_l)
+        
+        theta = math.atan2(y, x)
+        bearing = math.degrees(theta)
+        return (bearing + 360) % 360
+
+    def heversine(self, lat1, lon1, lat2, lon2):
+        R = 6371000.0
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        delta_p = math.radians(lat2 - lat1)
+        delta_l = math.radians(lon2 - lon1)
+
+        a = math.sin(delta_p / 2.0)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_l / 2.0)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+
+    def shortest(self, target_heading, yaw_deg):
         error = target_heading - yaw_deg
-
-        if error >180:
-            error-=360
-        elif error <-180:
-            error +=360
-
-
+        if error > 180:
+            error -= 360
+        elif error < -180:
+            error += 360
         return error
-    
 
 def main(args=None):
     rclpy.init(args=args)
     node = Human()
-    
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
@@ -174,7 +121,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
-
-        
-    
